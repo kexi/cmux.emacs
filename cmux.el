@@ -222,13 +222,21 @@ trailing CR / LF / TAB and would otherwise let them slip through."
 ;;;; Executable resolution and locality checks
 
 (defun cmux--ensure-executable ()
-  "Return the absolute path of `cmux-executable', or signal `user-error'."
-  (let* ((name cmux-executable)
-         (resolved (and (stringp name) (executable-find name))))
-    (unless resolved
-      (user-error "Cmux.el: cmux executable not found (cmux-executable=%S)"
-                  name))
-    resolved))
+  "Return the absolute path of `cmux-executable', or signal `user-error'.
+Rejects non-string, empty, or control-character-containing values
+before delegating to `executable-find', and signals `user-error' when
+the resulting binary cannot be located on `exec-path'."
+  (let ((name cmux-executable))
+    (unless (and (stringp name) (> (length name) 0))
+      (user-error "Cmux.el: `cmux-executable' must be a non-empty string"))
+    (when (string-match-p "[\x00-\x1f\x7f]" name)
+      (user-error
+       "Cmux.el: `cmux-executable' contains control characters"))
+    (let ((resolved (executable-find name)))
+      (unless resolved
+        (user-error "Cmux.el: cmux executable not found (cmux-executable=%S)"
+                    name))
+      resolved)))
 
 (defun cmux--ensure-local ()
   "Signal `user-error' if the current buffer is remote (TRAMP)."
@@ -246,7 +254,6 @@ timeout.  EXE must be an absolute path; ARGS must be strings."
   (with-temp-buffer
     (let* ((coding-system-for-read 'utf-8)
            (coding-system-for-write 'utf-8)
-           (process-environment process-environment)
            exit)
       (setq exit
             (with-timeout (cmux-call-timeout
@@ -300,9 +307,12 @@ Signal `user-error' when the exit code is non-zero."
 ;;;; Surface discovery
 
 (defun cmux--parse-tree (output)
-  "Parse OUTPUT from `cmux tree' into a list of (PANE . SURFACE) pairs."
+  "Parse OUTPUT from `cmux tree' into a list of (PANE . SURFACE) pairs.
+Matching is case-sensitive regardless of the user's
+`case-fold-search' setting."
   (let ((result nil)
-        (current-pane nil))
+        (current-pane nil)
+        (case-fold-search nil))
     (dolist (line (split-string (or output "") "\n"))
       (when (string-match "pane:[0-9]+" line)
         (setq current-pane (match-string 0 line)))
@@ -313,10 +323,11 @@ Signal `user-error' when the exit code is non-zero."
 (defun cmux--my-surface-ref (exe)
   "Return this Emacs process's own surface ref using EXE, or nil.
 First tries `cmux identify'; falls back to CMUX_SURFACE_ID when
-`cmux-surface-env-trust' is non-nil."
+`cmux-surface-env-trust' is non-nil.  Matching is case-sensitive."
   (let* ((res (cmux--call exe "identify"))
          (exit (car res))
-         (out (cdr res)))
+         (out (cdr res))
+         (case-fold-search nil))
     (or (and (eq exit 0)
              (string-match "surface:[0-9]+" out)
              (let ((ref (match-string 0 out)))
@@ -326,14 +337,16 @@ First tries `cmux identify'; falls back to CMUX_SURFACE_ID when
 
 (defun cmux--read-screen (exe surface lines)
   "Return the last LINES rows of SURFACE's screen using EXE.
-Return nil on failure."
+Return nil on failure.  ANSI CSI escape sequences are removed from
+the output to avoid confusing detection regexps."
   (let* ((res (cmux--call-with-separate-stderr
                exe "read-screen"
                "--surface" surface
                "--lines" (number-to-string lines)))
          (exit (car res))
          (stdout (cadr res)))
-    (when (eq exit 0) stdout)))
+    (when (eq exit 0)
+      (cmux--strip-ansi stdout))))
 
 (defun cmux--match-cli (screen)
   "Return the CLI name whose regexp matches SCREEN, or nil.
@@ -389,12 +402,16 @@ STYLE is one of the values accepted by `cmux-path-style'."
     (cmux--path-from-style abs cmux-path-style)))
 
 (defun cmux--format-line-info (beg end)
-  "Return the \":L<n>\" or \":L<n>-<m>\" suffix for region BEG..END."
-  (let ((l1 (line-number-at-pos beg))
-        (l2 (line-number-at-pos end)))
-    (if (= l1 l2)
-        (format ":L%d" l1)
-      (format ":L%d-%d" l1 l2))))
+  "Return the \":L<n>\" or \":L<n>-<m>\" suffix for region BEG..END.
+BEG and END may be given in either order; the output is always
+ascending."
+  (let* ((l1 (line-number-at-pos beg))
+         (l2 (line-number-at-pos end))
+         (lo (min l1 l2))
+         (hi (max l1 l2)))
+    (if (= lo hi)
+        (format ":L%d" lo)
+      (format ":L%d-%d" lo hi))))
 
 ;;;; Orchestration
 
@@ -443,7 +460,8 @@ have been validated by `cmux--sanitize-path'."
       (cmux--call exe "send-key" "--surface" surface "enter"))
     (when cmux-auto-focus
       (cmux--focus-surface exe surface))
-    (cmux--message "Sent -> @%s%s" path line-info)))
+    (cmux--message "Sent -> @%s%s"
+                   (abbreviate-file-name path) line-info)))
 
 (defun cmux--detect-internal (exe)
   "Scan surfaces with EXE and set `cmux-surface'/`cmux-cli-name' on match."

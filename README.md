@@ -137,6 +137,7 @@ All options live in the `cmux` customization group (`M-x customize-group RET cmu
 - Surface references are validated against a strict regexp (`surface:<digits>`), trimmed, length-limited, and NUL-rejected before being passed to the CLI. This applies to user input, `CMUX_SURFACE_ID`, and the output of `cmux identify` alike.
 - Each `cmux` invocation is bounded by `cmux-call-timeout`.
 - File paths containing NUL or control characters are rejected.
+- When `cmux-path-style` is set to `'absolute`, the full absolute path of the current buffer — including your home directory and user name — is sent to the AI CLI. The default `'git-root` (or `'relative-home`) avoids exposing this information; switch to `'absolute` only when you understand the implication.
 
 ## Credits
 

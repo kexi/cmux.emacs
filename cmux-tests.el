@@ -407,6 +407,121 @@ Return the last string argument of the first `send' subcommand."
         (setq default-directory "/tmp/")
         (should-error (cmux-send-file) :type 'user-error)))))
 
+;;;; cmux--ensure-executable: control-character rejection ---------------
+
+(ert-deftest cmux-test-C-16b-executable-with-nul-rejected ()
+  (let ((cmux-executable "bad\x00exe"))
+    (should-error (cmux--ensure-executable) :type 'user-error)))
+
+(ert-deftest cmux-test-C-16c-executable-with-escape-rejected ()
+  (let ((cmux-executable "bad\x1bexe"))
+    (should-error (cmux--ensure-executable) :type 'user-error)))
+
+;;;; cmux-surface-env-trust --------------------------------------------
+
+(ert-deftest cmux-test-D-04d-env-trust-nil-ignores-env ()
+  ;; When env trust is disabled, a valid CMUX_SURFACE_ID must not be
+  ;; promoted into `cmux-surface' and `cmux--detect-internal' is
+  ;; triggered instead.
+  (let* ((detect-called nil)
+         (cmux-surface nil)
+         (cmux-surface-env-trust nil)
+         (process-environment
+          (cons "CMUX_SURFACE_ID=surface:9" process-environment)))
+    (cl-letf (((symbol-function 'cmux--detect-internal)
+               (lambda (_exe) (setq detect-called t) nil)))
+      (should-error (cmux--ensure-surface "/opt/bin/cmux") :type 'user-error)
+      (should detect-called))))
+
+(ert-deftest cmux-test-D-04e-env-trust-t-uses-env ()
+  (let ((cmux-surface nil)
+        (cmux-surface-env-trust t)
+        (process-environment
+         (cons "CMUX_SURFACE_ID=surface:7" process-environment)))
+    (should (equal "surface:7"
+                   (cmux--ensure-surface "/opt/bin/cmux")))))
+
+;;;; cmux--truncate-for-error ------------------------------------------
+
+(ert-deftest cmux-test-Tr-01-strips-ansi-and-controls ()
+  (let ((result
+         (cmux--truncate-for-error
+          "\x1b[31mred\x1b[0m message with \x00 NUL")))
+    (should-not (string-match-p "\x1b" result))
+    (should-not (string-match-p "\x00" result))
+    (should (string-match-p "red" result))
+    (should (string-match-p "message" result))))
+
+(ert-deftest cmux-test-Tr-02-caps-at-500-chars ()
+  (let* ((long (make-string 1000 ?a))
+         (result (cmux--truncate-for-error long)))
+    (should (<= (length result) (+ 500 3)))
+    (should (string-suffix-p "..." result))))
+
+;;;; cmux--format-line-info: reversed order normalization --------------
+
+(ert-deftest cmux-test-F-06-reversed-region-is-normalized ()
+  (with-temp-buffer
+    (insert "one\ntwo\nthree\nfour\n")
+    (let ((line1 (point-min))
+          (line3 (progn (goto-char (point-min))
+                        (forward-line 2)
+                        (point))))
+      (should (equal ":L1-3" (cmux--format-line-info line3 line1)))
+      (should (equal ":L1-3" (cmux--format-line-info line1 line3))))))
+
+;;;; cmux--parse-tree: case-fold independence --------------------------
+
+(ert-deftest cmux-test-T-05-case-fold-does-not-affect-parsing ()
+  ;; Even with `case-fold-search' globally set to t (a common user
+  ;; preference), `cmux--parse-tree' must only accept lower-case
+  ;; "pane:" / "surface:" tokens produced by the cmux CLI.
+  (let ((case-fold-search t))
+    (should (null (cmux--parse-tree "PANE:0\n  SURFACE:1\n")))
+    (should (equal '(("pane:0" . "surface:1"))
+                   (cmux--parse-tree "pane:0\n  surface:1\n")))))
+
+;;;; cmux--read-screen: ANSI stripping ---------------------------------
+
+(ert-deftest cmux-test-RS-01-read-screen-strips-ansi ()
+  (cl-letf (((symbol-function 'cmux--call-with-separate-stderr)
+             (lambda (&rest _)
+               (cons 0 (cons "\x1b[31mclaude\x1b[0m banner" "")))))
+    (let ((out (cmux--read-screen "/opt/bin/cmux" "surface:1" 30)))
+      (should (stringp out))
+      (should-not (string-match-p "\x1b" out))
+      (should (string-match-p "claude" out)))))
+
+(ert-deftest cmux-test-RS-02-read-screen-returns-nil-on-failure ()
+  (cl-letf (((symbol-function 'cmux--call-with-separate-stderr)
+             (lambda (&rest _) (cons 1 (cons "" "boom")))))
+    (should (null (cmux--read-screen "/opt/bin/cmux" "surface:1" 30)))))
+
+;;;; cmux--send-ref: success message must not expose absolute path -----
+
+(ert-deftest cmux-test-MSG-01-success-message-uses-abbreviated-path ()
+  (let ((cmux-surface "surface:1")
+        (cmux-auto-focus nil)
+        (cmux-auto-enter nil)
+        (cmux-path-style 'absolute)
+        (captured nil))
+    (cl-letf (((symbol-function 'executable-find)
+               (lambda (n) (concat "/usr/local/bin/" n)))
+              ((symbol-function 'cmux--call)
+               (lambda (&rest _) (cons 0 "")))
+              ((symbol-function 'message)
+               (lambda (fmt &rest args)
+                 (setq captured (apply #'format fmt args))))
+              ((symbol-function 'abbreviate-file-name)
+               (lambda (p)
+                 (replace-regexp-in-string "\\`/home/kei" "~" p))))
+      (with-temp-buffer
+        (setq buffer-file-name "/home/kei/project/a.txt")
+        (setq default-directory "/home/kei/project/")
+        (cmux-send-file))
+      (should (string-match-p "~/project/a.txt" (or captured "")))
+      (should-not (string-match-p "/home/kei/" (or captured ""))))))
+
 (provide 'cmux-tests)
 
 ;;; cmux-tests.el ends here
